@@ -15,6 +15,7 @@ describe('Beinleumi', () => {
     expect(SCRAPERS.beinleumi).toBeDefined();
     expect(SCRAPERS.beinleumi.loginFields).toContain('username');
     expect(SCRAPERS.beinleumi.loginFields).toContain('password');
+    expect(SCRAPERS.beinleumi.loginFields).not.toContain('otpCodeRetriever');
   });
 
   maybeTestCompanyAPI(COMPANY_ID, config => config.companyAPI.invalidPassword)(

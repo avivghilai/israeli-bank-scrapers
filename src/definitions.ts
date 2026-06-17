@@ -46,7 +46,7 @@ export const SCRAPERS = {
   },
   [CompanyTypes.otsarHahayal]: {
     name: 'Bank Otsar Hahayal',
-    loginFields: ['username', PASSWORD_FIELD],
+    loginFields: ['username', PASSWORD_FIELD, 'otpCodeRetriever'],
   },
   [CompanyTypes.max]: {
     name: 'Max',
