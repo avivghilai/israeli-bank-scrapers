@@ -188,7 +188,7 @@ See the [OptInFeatures](https://github.com/eshaham/israeli-bank-scrapers/blob/ma
 Some companies require two-factor authentication, and as such the scraper cannot be fully automated. When using the relevant scrapers, you have three options:
 1. Provide an async callback that knows how to retrieve real time secrets like OTP codes.
 2. When supported by the scraper - provide a "long term token". These are usually available if the financial provider only requires Two-Factor authentication periodically, and not on every login. You can retrieve your long term token from the relevant credit/banking app using reverse engineering and a MITM proxy, or use helper functions that are provided by some Two-Factor Auth scrapers (e.g. OneZero).
-3. Use `deviceTrustData` to persist and restore device identity (cookies and localStorage). After a successful login with OTP, the scraper returns `deviceTrustData` in the result. On subsequent runs, pass it back via the `deviceTrustData` option to skip OTP entirely — the bank recognizes the device and doesn't prompt for verification. Currently supported by Hapoalim (see [Bank Hapoalim scraper](#bank-hapoalim-scraper) for a full example).
+3. Use `deviceTrustData` to persist and restore device identity (cookies and localStorage). After a successful login with OTP, the scraper returns `deviceTrustData` in the result. On subsequent runs, pass it back via the `deviceTrustData` option to skip OTP entirely when the bank recognizes the device. Currently supported by Hapoalim and Otsar Hahayal (see the bank-specific sections for details).
 
 
 ```node
@@ -310,7 +310,7 @@ if (result.success && result.deviceTrustData) {
 }
 ```
 
-The `deviceTrustData` option is available for all browser-based scrapers, but the OTP flow is currently specific to Hapoalim.
+The `deviceTrustData` option is available for all browser-based scrapers, but the OTP flow is currently implemented only by specific banks.
 
 ## Bank Leumi scraper
 This scraper expects the following credentials object:
@@ -373,7 +373,7 @@ This scraper expects the following credentials object:
 const credentials = {
   username: <user name>,
   password: <user password>,
-  otpCodeRetriever: async ({ attempt }) => {
+  otpCodeRetriever: async ({ attempt, purpose, canRegisterTrustedDevice }) => {
     return await promptUserForOtpCode();
   }
 };
@@ -385,7 +385,23 @@ Otsar Hahayal may require SMS OTP verification. When OTP is required, the scrape
 
 The callback is only called when the bank actually shows the OTP challenge. `attempt` starts at 1 and the scraper retries up to 3 times.
 
-Persisting `deviceTrustData` is still supported by the browser scraper base, but during testing it was not sufficient to skip Otsar Hahayal OTP by itself.
+When `canRegisterTrustedDevice` is true, the callback may return `{ code, registerTrustedDevice: true }` instead of a plain code string. In that case, after login succeeds the scraper registers the current browser as a trusted device, asks for a second OTP with `purpose: 'trusted-device-registration'`, and returns updated `deviceTrustData`.
+
+```typescript
+const result = await scraper.scrape({
+  username: '...',
+  password: '...',
+  otpCodeRetriever: async ({ attempt, purpose, canRegisterTrustedDevice }) => {
+    const code = await promptUserForOtpCode({ attempt, purpose });
+    if (purpose === 'login' && canRegisterTrustedDevice && userApprovedTrustedDeviceRegistration()) {
+      return { code, registerTrustedDevice: true };
+    }
+    return code;
+  },
+});
+```
+
+Persisting `deviceTrustData` is supported by the browser scraper base. For Otsar Hahayal, testing showed that trust data only skips future OTP challenges after the device is explicitly registered as trusted.
 
 ## Visa Cal scraper
 This scraper expects the following credentials object:

@@ -5,9 +5,24 @@ import { type ErrorResult, type ScraperErrorTypes } from './errors';
 
 // TODO: Remove this type when the scraper 'factory' will return concrete scraper types
 // Instead of a generic interface (which in turn uses this type)
+export type OtpChallengePurpose = 'login' | 'trusted-device-registration';
+
+export interface OtpCodeRetrieverOptions {
+  attempt: number;
+  purpose?: OtpChallengePurpose;
+  canRegisterTrustedDevice?: boolean;
+}
+
+export interface OtpCodeResponse {
+  code: string;
+  registerTrustedDevice?: boolean;
+}
+
+export type OtpCodeRetriever = (options?: OtpCodeRetrieverOptions) => Promise<string | OtpCodeResponse>;
+
 export type ScraperCredentials =
-  | { userCode: string; password: string; otpCodeRetriever?: (options?: { attempt: number }) => Promise<string> }
-  | { username: string; password: string; otpCodeRetriever?: (options?: { attempt: number }) => Promise<string> }
+  | { userCode: string; password: string; otpCodeRetriever?: OtpCodeRetriever }
+  | { username: string; password: string; otpCodeRetriever?: OtpCodeRetriever }
   | { id: string; password: string }
   | { id: string; password: string; num: string }
   | { id: string; password: string; card6Digits: string }
