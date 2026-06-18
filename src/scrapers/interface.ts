@@ -7,7 +7,7 @@ import { type ErrorResult, type ScraperErrorTypes } from './errors';
 // Instead of a generic interface (which in turn uses this type)
 export type ScraperCredentials =
   | { userCode: string; password: string; otpCodeRetriever?: (options?: { attempt: number }) => Promise<string> }
-  | { username: string; password: string }
+  | { username: string; password: string; otpCodeRetriever?: (options?: { attempt: number }) => Promise<string> }
   | { id: string; password: string }
   | { id: string; password: string; num: string }
   | { id: string; password: string; card6Digits: string }

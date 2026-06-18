@@ -15,6 +15,7 @@ describe('OtsarHahayal legacy scraper', () => {
     expect(SCRAPERS.otsarHahayal).toBeDefined();
     expect(SCRAPERS.otsarHahayal.loginFields).toContain('username');
     expect(SCRAPERS.otsarHahayal.loginFields).toContain('password');
+    expect(SCRAPERS.otsarHahayal.loginFields).toContain('otpCodeRetriever');
   });
 
   maybeTestCompanyAPI(COMPANY_ID, config => config.companyAPI.invalidPassword)(

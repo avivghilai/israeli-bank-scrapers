@@ -8,12 +8,13 @@ import {
   pageEvalAll,
   waitUntilElementFound,
 } from '../helpers/elements-interactions';
-import { waitForNavigation } from '../helpers/navigation';
+import { getCurrentUrl, waitForNavigation } from '../helpers/navigation';
 import { getRawTransaction } from '../helpers/transactions';
-import { sleep } from '../helpers/waiting';
+import { sleep, waitUntil } from '../helpers/waiting';
 import { TransactionStatuses, TransactionTypes, type Transaction, type TransactionsAccount } from '../transactions';
 import { BaseScraperWithBrowser, LoginResults, type PossibleLoginResults } from './base-scraper-with-browser';
-import { type ScraperOptions } from './interface';
+import { ScraperErrorTypes } from './errors';
+import { type ScraperLoginResult, type ScraperOptions } from './interface';
 
 const DATE_FORMAT = 'DD/MM/YYYY';
 const NO_TRANSACTION_IN_DATE_RANGE_TEXT = 'לא נמצאו נתונים בנושא המבוקש';
@@ -34,6 +35,12 @@ const NEXT_PAGE_LINK = 'a#Npage.paging';
 const CURRENT_BALANCE = '.main_balance';
 const IFRAME_NAME = 'iframe-old-pages';
 const ELEMENT_RENDER_TIMEOUT_MS = 10000;
+const OTP_SEND_SMS_BUTTON_SELECTOR = '#sendSms';
+const OTP_CODE_INPUT_SELECTOR = '#codeinput';
+const OTP_FORM_SELECTOR = '#formcode';
+const OTP_SUBMIT_BUTTON_SELECTOR = '.otpSubmitButton';
+const OTP_ERROR_SELECTOR = '#otpErrorMessage';
+const MAX_OTP_ATTEMPTS = 3;
 
 type TransactionsColsTypes = Record<string, number>;
 type TransactionsTrTds = string[];
@@ -57,6 +64,20 @@ export function getPossibleLoginResults(): PossibleLoginResults {
     /FibiMenu\/Online/, // Old UI pattern
   ];
   urls[LoginResults.InvalidPassword] = [/FibiMenu\/Marketing\/Private\/Home/];
+  return urls;
+}
+
+export function getPossibleLoginResultsWithOtp(): PossibleLoginResults {
+  const urls = getPossibleLoginResults();
+  urls[LoginResults.TwoFactorRetrieverMissing] = [
+    async (options?: { page?: Page }) => {
+      if (!options?.page) return false;
+      return (
+        (await elementPresentOnPage(options.page, OTP_SEND_SMS_BUTTON_SELECTOR)) ||
+        (await elementPresentOnPage(options.page, OTP_CODE_INPUT_SELECTOR))
+      );
+    },
+  ];
   return urls;
 }
 
@@ -320,6 +341,26 @@ export async function waitForPostLogin(page: Page) {
   ]);
 }
 
+async function isPostLoginOrOtp(page: Page) {
+  const currentUrl = await getCurrentUrl(page, true);
+  return (
+    /fibi.*accountSummary/.test(currentUrl) ||
+    /Resources\/PortalNG\/shell/.test(currentUrl) ||
+    /FibiMenu\/Online/.test(currentUrl) ||
+    /FibiMenu\/Marketing\/Private\/Home/.test(currentUrl) ||
+    (await elementPresentOnPage(page, '#card-header')) ||
+    (await elementPresentOnPage(page, '#account_num')) ||
+    (await elementPresentOnPage(page, '#matafLogoutLink')) ||
+    (await elementPresentOnPage(page, '#validationMsg')) ||
+    (await elementPresentOnPage(page, OTP_SEND_SMS_BUTTON_SELECTOR)) ||
+    (await elementPresentOnPage(page, OTP_CODE_INPUT_SELECTOR))
+  );
+}
+
+async function waitForPostLoginOrOtp(page: Page) {
+  await waitUntil(() => isPostLoginOrOtp(page), 'waiting for post-login page or OTP challenge', 30000, 1000);
+}
+
 async function fetchAccountData(page: Page | Frame, startDate: Moment, options?: ScraperOptions) {
   const accountNumber = await getAccountNumber(page);
   const balance = await getCurrentBalance(page);
@@ -500,7 +541,11 @@ async function fetchAccounts(page: Page, startDate: Moment, options?: ScraperOpt
   return accounts;
 }
 
-type ScraperSpecificCredentials = { username: string; password: string };
+type ScraperSpecificCredentials = {
+  username: string;
+  password: string;
+  otpCodeRetriever?: (options?: { attempt: number }) => Promise<string>;
+};
 
 class BeinleumiGroupBaseScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials> {
   BASE_URL = '';
@@ -509,18 +554,91 @@ class BeinleumiGroupBaseScraper extends BaseScraperWithBrowser<ScraperSpecificCr
 
   TRANSACTIONS_URL = '';
 
+  SUPPORTS_OTP = false;
+
   getLoginOptions(credentials: ScraperSpecificCredentials) {
     return {
       loginUrl: `${this.LOGIN_URL}`,
       fields: createLoginFields(credentials),
       submitButtonSelector: '#continueBtn',
-      postAction: async () => waitForPostLogin(this.page),
-      possibleResults: getPossibleLoginResults(),
+      postAction: async () => (this.SUPPORTS_OTP ? waitForPostLoginOrOtp(this.page) : waitForPostLogin(this.page)),
+      possibleResults: this.SUPPORTS_OTP ? getPossibleLoginResultsWithOtp() : getPossibleLoginResults(),
       // HACK: For some reason, though the login button (#continueBtn) is present and visible, the click action does not perform.
       // Adding this delay fixes the issue.
       preAction: async () => {
         await sleep(1000);
       },
+    };
+  }
+
+  async login(credentials: ScraperSpecificCredentials): Promise<ScraperLoginResult> {
+    const result = await super.login(credentials);
+
+    if (!this.SUPPORTS_OTP || result.success || result.errorType !== ScraperErrorTypes.TwoFactorRetrieverMissing) {
+      return result;
+    }
+
+    if (!credentials.otpCodeRetriever) {
+      return {
+        success: false,
+        errorType: ScraperErrorTypes.TwoFactorRetrieverMissing,
+        errorMessage: 'OTP code retriever is required for Otsar Hahayal 2FA',
+      };
+    }
+
+    if (await elementPresentOnPage(this.page, OTP_SEND_SMS_BUTTON_SELECTOR)) {
+      await clickButton(this.page, OTP_SEND_SMS_BUTTON_SELECTOR);
+      await waitUntilElementFound(this.page, OTP_CODE_INPUT_SELECTOR, true, ELEMENT_RENDER_TIMEOUT_MS);
+    }
+
+    for (let attempt = 1; attempt <= MAX_OTP_ATTEMPTS; attempt++) {
+      const otpCode = await credentials.otpCodeRetriever({ attempt });
+      await fillInput(this.page, OTP_CODE_INPUT_SELECTOR, otpCode);
+      await this.page.click(OTP_SUBMIT_BUTTON_SELECTOR);
+
+      const otpResult = await waitUntil(
+        async () => {
+          try {
+            const currentUrl = await getCurrentUrl(this.page, true);
+            const otpFormPresent = await elementPresentOnPage(this.page, OTP_FORM_SELECTOR);
+            const errorText = await this.page
+              .$eval(OTP_ERROR_SELECTOR, element => (element.textContent || '').trim())
+              .catch(() => '');
+
+            if (
+              /fibi.*accountSummary/.test(currentUrl) ||
+              /Resources\/PortalNG\/shell/.test(currentUrl) ||
+              /FibiMenu\/Online/.test(currentUrl)
+            ) {
+              return 'success';
+            }
+            if (!otpFormPresent) {
+              return 'success';
+            }
+            if (errorText) {
+              return 'error';
+            }
+            return false;
+          } catch {
+            // Navigation can temporarily destroy the execution context after a successful submit.
+            return false;
+          }
+        },
+        'waiting for OTP verification result',
+        20000,
+        1000,
+      ).catch(() => 'error');
+
+      if (otpResult === 'success') {
+        await waitForPostLogin(this.page);
+        return { success: true };
+      }
+    }
+
+    return {
+      success: false,
+      errorType: ScraperErrorTypes.General,
+      errorMessage: `OTP verification failed after ${MAX_OTP_ATTEMPTS} attempts`,
     };
   }
 

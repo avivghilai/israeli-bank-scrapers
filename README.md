@@ -372,10 +372,20 @@ This scraper expects the following credentials object:
 ```node
 const credentials = {
   username: <user name>,
-  password: <user password>
+  password: <user password>,
+  otpCodeRetriever: async ({ attempt }) => {
+    return await promptUserForOtpCode();
+  }
 };
 ```
 This scraper supports fetching transaction from up to one year.
+
+### Two-Factor Authentication (OTP)
+Otsar Hahayal may require SMS OTP verification. When OTP is required, the scraper asks for a code by calling `otpCodeRetriever`.
+
+The callback is only called when the bank actually shows the OTP challenge. `attempt` starts at 1 and the scraper retries up to 3 times.
+
+Persisting `deviceTrustData` is still supported by the browser scraper base, but during testing it was not sufficient to skip Otsar Hahayal OTP by itself.
 
 ## Visa Cal scraper
 This scraper expects the following credentials object:
