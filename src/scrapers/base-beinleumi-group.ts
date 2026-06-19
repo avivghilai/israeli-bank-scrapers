@@ -6,6 +6,7 @@ import {
   elementPresentOnPage,
   fillInput,
   pageEvalAll,
+  waitUntilIframeFound,
   waitUntilElementFound,
 } from '../helpers/elements-interactions';
 import { getCurrentUrl, waitForNavigation } from '../helpers/navigation';
@@ -14,7 +15,8 @@ import { sleep, waitUntil } from '../helpers/waiting';
 import { TransactionStatuses, TransactionTypes, type Transaction, type TransactionsAccount } from '../transactions';
 import { BaseScraperWithBrowser, LoginResults, type PossibleLoginResults } from './base-scraper-with-browser';
 import { ScraperErrorTypes } from './errors';
-import { type ScraperLoginResult, type ScraperOptions } from './interface';
+import { type OtpCodeRetriever, type ScraperLoginResult, type ScraperOptions } from './interface';
+import { getOtpCodeResponse } from './otp';
 
 const DATE_FORMAT = 'DD/MM/YYYY';
 const NO_TRANSACTION_IN_DATE_RANGE_TEXT = 'לא נמצאו נתונים בנושא המבוקש';
@@ -41,6 +43,10 @@ const OTP_FORM_SELECTOR = '#formcode';
 const OTP_SUBMIT_BUTTON_SELECTOR = '.otpSubmitButton';
 const OTP_ERROR_SELECTOR = '#otpErrorMessage';
 const MAX_OTP_ATTEMPTS = 3;
+const TRUSTED_DEVICE_ADD_BUTTON_SELECTOR = '.deviceExist';
+const TRUSTED_DEVICE_SEND_SMS_BUTTON_SELECTOR = '#sendButton';
+const TRUSTED_DEVICE_CODE_INPUT_SELECTOR = '#inputPassword';
+const TRUSTED_DEVICE_SUBMIT_BUTTON_SELECTOR = '#submitPasswordBT';
 
 type TransactionsColsTypes = Record<string, number>;
 type TransactionsTrTds = string[];
@@ -342,19 +348,25 @@ export async function waitForPostLogin(page: Page) {
 }
 
 async function isPostLoginOrOtp(page: Page) {
-  const currentUrl = await getCurrentUrl(page, true);
-  return (
-    /fibi.*accountSummary/.test(currentUrl) ||
-    /Resources\/PortalNG\/shell/.test(currentUrl) ||
-    /FibiMenu\/Online/.test(currentUrl) ||
-    /FibiMenu\/Marketing\/Private\/Home/.test(currentUrl) ||
-    (await elementPresentOnPage(page, '#card-header')) ||
-    (await elementPresentOnPage(page, '#account_num')) ||
-    (await elementPresentOnPage(page, '#matafLogoutLink')) ||
-    (await elementPresentOnPage(page, '#validationMsg')) ||
-    (await elementPresentOnPage(page, OTP_SEND_SMS_BUTTON_SELECTOR)) ||
-    (await elementPresentOnPage(page, OTP_CODE_INPUT_SELECTOR))
-  );
+  try {
+    const currentUrl = await Promise.resolve(getCurrentUrl(page, true)).catch(() => '');
+    return (
+      /fibi.*accountSummary/.test(currentUrl) ||
+      /Resources\/PortalNG\/shell/.test(currentUrl) ||
+      /FibiMenu\/Marketing\/Private\/Home/.test(currentUrl) ||
+      page.frames().some(frame => frame.name() === IFRAME_NAME && /FibiMenu\/Online/.test(frame.url())) ||
+      (await elementPresentOnPage(page, '#card-header')) ||
+      (await elementPresentOnPage(page, '#account_num')) ||
+      (await elementPresentOnPage(page, '#matafLogoutLink')) ||
+      (await elementPresentOnPage(page, '#validationMsg')) ||
+      (await elementPresentOnPage(page, OTP_SEND_SMS_BUTTON_SELECTOR)) ||
+      (await elementPresentOnPage(page, OTP_CODE_INPUT_SELECTOR))
+    );
+  } catch {
+    // Otsar redirects through transient pages after login. During those
+    // redirects the execution context can be destroyed; keep polling.
+    return false;
+  }
 }
 
 async function waitForPostLoginOrOtp(page: Page) {
@@ -544,7 +556,7 @@ async function fetchAccounts(page: Page, startDate: Moment, options?: ScraperOpt
 type ScraperSpecificCredentials = {
   username: string;
   password: string;
-  otpCodeRetriever?: (options?: { attempt: number }) => Promise<string>;
+  otpCodeRetriever?: OtpCodeRetriever;
 };
 
 class BeinleumiGroupBaseScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials> {
@@ -555,6 +567,10 @@ class BeinleumiGroupBaseScraper extends BaseScraperWithBrowser<ScraperSpecificCr
   TRANSACTIONS_URL = '';
 
   SUPPORTS_OTP = false;
+
+  SUPPORTS_TRUSTED_DEVICE_REGISTRATION = false;
+
+  TRUSTED_DEVICE_REGISTRATION_URL = '';
 
   getLoginOptions(credentials: ScraperSpecificCredentials) {
     return {
@@ -592,7 +608,12 @@ class BeinleumiGroupBaseScraper extends BaseScraperWithBrowser<ScraperSpecificCr
     }
 
     for (let attempt = 1; attempt <= MAX_OTP_ATTEMPTS; attempt++) {
-      const otpCode = await credentials.otpCodeRetriever({ attempt });
+      const otpResponse = await getOtpCodeResponse(credentials.otpCodeRetriever, {
+        attempt,
+        purpose: 'login',
+        canRegisterTrustedDevice: this.SUPPORTS_TRUSTED_DEVICE_REGISTRATION,
+      });
+      const otpCode = otpResponse.code;
       await fillInput(this.page, OTP_CODE_INPUT_SELECTOR, otpCode);
       await this.page.click(OTP_SUBMIT_BUTTON_SELECTOR);
 
@@ -631,6 +652,9 @@ class BeinleumiGroupBaseScraper extends BaseScraperWithBrowser<ScraperSpecificCr
 
       if (otpResult === 'success') {
         await waitForPostLogin(this.page);
+        if (otpResponse.registerTrustedDevice && this.SUPPORTS_TRUSTED_DEVICE_REGISTRATION) {
+          return this.registerTrustedDevice(credentials);
+        }
         return { success: true };
       }
     }
@@ -639,6 +663,95 @@ class BeinleumiGroupBaseScraper extends BaseScraperWithBrowser<ScraperSpecificCr
       success: false,
       errorType: ScraperErrorTypes.General,
       errorMessage: `OTP verification failed after ${MAX_OTP_ATTEMPTS} attempts`,
+    };
+  }
+
+  private async registerTrustedDevice(credentials: ScraperSpecificCredentials): Promise<ScraperLoginResult> {
+    if (!this.TRUSTED_DEVICE_REGISTRATION_URL) {
+      return {
+        success: false,
+        errorType: ScraperErrorTypes.General,
+        errorMessage: 'Trusted device registration URL is not configured',
+      };
+    }
+
+    if (!credentials.otpCodeRetriever) {
+      return {
+        success: false,
+        errorType: ScraperErrorTypes.TwoFactorRetrieverMissing,
+        errorMessage: 'OTP code retriever is required to register a trusted device',
+      };
+    }
+
+    await this.navigateTo(this.TRUSTED_DEVICE_REGISTRATION_URL);
+    const trustedDeviceFrame = await waitUntilIframeFound(
+      this.page,
+      frame =>
+        frame.name() === IFRAME_NAME &&
+        frame.url().includes('/wps/myportal/FibiMenu/Online/AuthServicesInfo/OnlnServicesForU/FibiGuard'),
+      'waiting for trusted device frame',
+      ELEMENT_RENDER_TIMEOUT_MS,
+    );
+
+    await waitUntilElementFound(
+      trustedDeviceFrame,
+      TRUSTED_DEVICE_ADD_BUTTON_SELECTOR,
+      true,
+      ELEMENT_RENDER_TIMEOUT_MS,
+    );
+    await clickButton(trustedDeviceFrame, TRUSTED_DEVICE_ADD_BUTTON_SELECTOR);
+    await waitUntil(
+      async () => {
+        const bodyText = await trustedDeviceFrame.evaluate(() => document.body?.innerText || '');
+        return bodyText.includes('לצורך אימות זהותך') && bodyText.includes('שלחו לי סיסמה');
+      },
+      'waiting for trusted device verification popup',
+      ELEMENT_RENDER_TIMEOUT_MS,
+      1000,
+    );
+    await waitUntilElementFound(
+      trustedDeviceFrame,
+      TRUSTED_DEVICE_SEND_SMS_BUTTON_SELECTOR,
+      true,
+      ELEMENT_RENDER_TIMEOUT_MS,
+    );
+    await clickButton(trustedDeviceFrame, TRUSTED_DEVICE_SEND_SMS_BUTTON_SELECTOR);
+    await waitUntilElementFound(
+      trustedDeviceFrame,
+      TRUSTED_DEVICE_CODE_INPUT_SELECTOR,
+      true,
+      ELEMENT_RENDER_TIMEOUT_MS,
+    );
+
+    for (let attempt = 1; attempt <= MAX_OTP_ATTEMPTS; attempt++) {
+      const { code: otpCode } = await getOtpCodeResponse(credentials.otpCodeRetriever, {
+        attempt,
+        purpose: 'trusted-device-registration',
+        canRegisterTrustedDevice: true,
+      });
+
+      await fillInput(trustedDeviceFrame, TRUSTED_DEVICE_CODE_INPUT_SELECTOR, otpCode);
+      await clickButton(trustedDeviceFrame, TRUSTED_DEVICE_SUBMIT_BUTTON_SELECTOR);
+
+      const registrationSucceeded = await waitUntil(
+        async () => {
+          const stillWaitingForOtp = await elementPresentOnPage(trustedDeviceFrame, TRUSTED_DEVICE_CODE_INPUT_SELECTOR);
+          return !stillWaitingForOtp;
+        },
+        'waiting for trusted device registration result',
+        20000,
+        1000,
+      ).catch(() => false);
+
+      if (registrationSucceeded) {
+        return { success: true };
+      }
+    }
+
+    return {
+      success: false,
+      errorType: ScraperErrorTypes.General,
+      errorMessage: `Trusted device registration failed after ${MAX_OTP_ATTEMPTS} attempts`,
     };
   }
 

@@ -8,7 +8,8 @@ import { sleep, waitUntil } from '../helpers/waiting';
 import { type Transaction, TransactionStatuses, TransactionTypes, type TransactionsAccount } from '../transactions';
 import { BaseScraperWithBrowser, LoginResults, type PossibleLoginResults } from './base-scraper-with-browser';
 import { ScraperErrorTypes } from './errors';
-import { type ScraperLoginResult, type ScraperOptions } from './interface';
+import { type OtpCodeRetriever, type ScraperLoginResult, type ScraperOptions } from './interface';
+import { getOtpCodeResponse } from './otp';
 import { getRawTransaction } from '../helpers/transactions';
 
 const debug = getDebug('hapoalim');
@@ -293,7 +294,7 @@ function createLoginFields(credentials: ScraperSpecificCredentials) {
 type ScraperSpecificCredentials = {
   userCode: string;
   password: string;
-  otpCodeRetriever?: (options?: { attempt: number }) => Promise<string>;
+  otpCodeRetriever?: OtpCodeRetriever;
 };
 
 class HapoalimScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials> {
@@ -348,7 +349,11 @@ class HapoalimScraper extends BaseScraperWithBrowser<ScraperSpecificCredentials>
     const MAX_OTP_ATTEMPTS = 3;
     for (let attempt = 1; attempt <= MAX_OTP_ATTEMPTS; attempt++) {
       debug(`2FA page detected, requesting OTP from caller (attempt ${attempt}/${MAX_OTP_ATTEMPTS})`);
-      const otpCode = await credentials.otpCodeRetriever({ attempt });
+      const { code: otpCode } = await getOtpCodeResponse(credentials.otpCodeRetriever, {
+        attempt,
+        purpose: 'login',
+        canRegisterTrustedDevice: false,
+      });
 
       debug('entering OTP code');
       const otpInputs = await this.page.$$(`${OTP_FORM_SELECTOR} input[type="text"]`);
