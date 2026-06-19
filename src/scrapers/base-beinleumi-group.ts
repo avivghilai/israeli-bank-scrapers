@@ -348,19 +348,25 @@ export async function waitForPostLogin(page: Page) {
 }
 
 async function isPostLoginOrOtp(page: Page) {
-  const currentUrl = await getCurrentUrl(page, true);
-  return (
-    /fibi.*accountSummary/.test(currentUrl) ||
-    /Resources\/PortalNG\/shell/.test(currentUrl) ||
-    /FibiMenu\/Online/.test(currentUrl) ||
-    /FibiMenu\/Marketing\/Private\/Home/.test(currentUrl) ||
-    (await elementPresentOnPage(page, '#card-header')) ||
-    (await elementPresentOnPage(page, '#account_num')) ||
-    (await elementPresentOnPage(page, '#matafLogoutLink')) ||
-    (await elementPresentOnPage(page, '#validationMsg')) ||
-    (await elementPresentOnPage(page, OTP_SEND_SMS_BUTTON_SELECTOR)) ||
-    (await elementPresentOnPage(page, OTP_CODE_INPUT_SELECTOR))
-  );
+  try {
+    const currentUrl = await Promise.resolve(getCurrentUrl(page, true)).catch(() => '');
+    return (
+      /fibi.*accountSummary/.test(currentUrl) ||
+      /Resources\/PortalNG\/shell/.test(currentUrl) ||
+      /FibiMenu\/Marketing\/Private\/Home/.test(currentUrl) ||
+      page.frames().some(frame => frame.name() === IFRAME_NAME && /FibiMenu\/Online/.test(frame.url())) ||
+      (await elementPresentOnPage(page, '#card-header')) ||
+      (await elementPresentOnPage(page, '#account_num')) ||
+      (await elementPresentOnPage(page, '#matafLogoutLink')) ||
+      (await elementPresentOnPage(page, '#validationMsg')) ||
+      (await elementPresentOnPage(page, OTP_SEND_SMS_BUTTON_SELECTOR)) ||
+      (await elementPresentOnPage(page, OTP_CODE_INPUT_SELECTOR))
+    );
+  } catch {
+    // Otsar redirects through transient pages after login. During those
+    // redirects the execution context can be destroyed; keep polling.
+    return false;
+  }
 }
 
 async function waitForPostLoginOrOtp(page: Page) {
